@@ -4,8 +4,10 @@
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 //--- Includes
+#define FILE_NAME MQLInfoString(MQL_PROGRAM_NAME)+".bin"
 #include <trade/trade.mqh>
 #include <arrays/arraylong.mqh>
+#include <Arrays\ArrayObj.mqh>
 //--- Variables
 enum ENUM_MODE
 {
@@ -21,6 +23,7 @@ enum ENUM_TESTSTAGE
     STAGE_FUNDED,       // Do FARM trade with inverted order type and correct lotsize.
 };
 CTrade trade;
+double LOTSTEP;
 //--- input parameters
 // Inputs for Propfirm Information
 input double profitTarget = 0.08;
@@ -30,13 +33,12 @@ input double realAccountSize = 3000;
 input ENUM_MODE Mode = MODE_FARM;
 input ENUM_TESTSTAGE Stage = STAGE_FULLY_FUNDED;
 
-
-
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
   {
+    LOTSTEP = SymbolInfoDouble(Symbol(),SYMBOL_VOLUME_STEP);
     EventSetMillisecondTimer(500);
     return(INIT_SUCCEEDED);
   }
@@ -47,6 +49,42 @@ void OnDeinit(const int reason)
   {
     EventKillTimer();
   }
+
+//+------------------------------------------------------------------+
+//| Helper functions                                                 |
+//+------------------------------------------------------------------+
+void ClearFile()
+{
+    int file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
+    if (file != INVALID_HANDLE)
+    {
+        FileClose(file);
+    }
+}
+
+void WritePositionToFile(int file, CPositionInfo &pos)
+{
+    FileWriteLong(file, pos.Ticket());
+    int length = StringLen(pos.Symbol());
+    FileWriteInteger(file, length);
+    FileWriteString(file, pos.Symbol());
+    FileWriteDouble(file, pos.Volume());
+    FileWriteInteger(file, pos.PositionType());
+    FileWriteDouble(file, pos.PriceOpen());
+}
+
+bool PositionExistsInArray(CArrayObj<CPositionInfo> &positionsArray, ulong ticket)
+{
+    for(int i = 0; i < positionsArray.Total(); i++)
+    {
+        CPositionInfo *filePos = positionsArray.At(i);
+        if(filePos.Ticket() == ticket)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 void OnTimer(){
     if(Mode == MODE_PROPFIRM){
         int file = FileOpen(FILE_NAME,FILE_WRITE|FILE_BIN|FILE_COMMON);
@@ -54,7 +92,7 @@ void OnTimer(){
         if(file != INVALID_HANDLE){
             if(PositionsTotal() > 0){
                 for(int i = PositionsTotal()-1; i >= 0; i--){
-                    CPositionsInfo pos;
+                    CPositionInfo pos;
                     if(pos.SelectByIndex(i)){
                         FileWriteLong(file,pos.Ticket());
                         int length = StringLen(pos.Symbol());
@@ -63,15 +101,51 @@ void OnTimer(){
                         FileWriteDouble(file,pos.Volume());
                         FileWriteInteger(file,pos.PositionType());
                         FileWriteDouble(file,pos.PriceOpen());
-                        FileWriteDouble(file,pos.StopLoss());
-                        FileWriteDouble(file,pos.TakeProfit());
                     }
                 }
             }
             FileClose(file);
         }
     }else if(Mode == MODE_FARM){
+        CArrayLong arr;
+        arr.Sort();
 
+        int file = FileOpen(FILE_NAME,FILE_READ|FILE_BIN|FILE_COMMON);
+        if(file != INVALID_HANDLE){
+            while(!FileIsEnding(file)){
+                ulong posTicket = FileReadLong(file);
+                int length = FileReadInteger(file);
+                string posSymbol = FileReadString(file, length);
+                double posVolume = FileReadDouble(file);
+                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)FileReadInteger(file);
+                double posPriceOpen = FileReadDouble(file);
+
+                if(arr.SearchFirst(posTicket) < 0){
+                    double farmLotSize = CalculateFarmLotSize(posVolume);
+                    ENUM_POSITION_TYPE farmType = (posType == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+
+                    if(farmType == POSITION_TYPE_BUY){
+                        trade.Buy(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                    } else if(farmType == POSITION_TYPE_SELL){
+                        trade.Sell(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                    }
+
+                    if(trade.ResultRetcode() == TRADE_RETCODE_DONE){
+                        arr.InsertSort(posTicket);
+                    }
+                }
+            }
+            FileClose(file);
+
+            for(int i = PositionsTotal()-1; i >= 0; i--){
+                CPositionInfo pos;
+                if(pos.SelectByIndex(i)){
+                    if(arr.SearchFirst(StringToInteger(pos.Comment())) < 0){
+                        trade.PositionClose(pos.Ticket());
+                    }
+                }
+            }
+        }
     }else if(Mode == MODE_SHADOW){
         CArrayLong arr;
         arr.Sort();
@@ -85,8 +159,6 @@ void OnTimer(){
                 double posVolume = FileReadDouble(file);
                 ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)FileReadInteger(file);
                 double posPriceOpen = FileReadDouble(file);
-                double posSl = FileReadDouble(file);
-                double posTp = FileReadDouble(file);
 
                 for(int i = PositionsTotal()-1; i >= 0; i--){
                     CPositionInfo pos;
@@ -95,24 +167,20 @@ void OnTimer(){
                             if(arr.SearchFirst(posTicket) < 0){
                                 arr.InsertSort(posTicket);
                             }
-
-                            if(pos.StopLoss() != posSl || pos.TakeProfit() != posTp){
-                                trade.PositionModify(pos.Ticket(),posSl,posTp);
-                            }
                             break;
                         }
                     }
                 }
                 if(arr.SearchFirst(posTicket) < 0){
                     if(posType == POSITION_TYPE_BUY){
-                        trade.Buy(posVolume,posSymbol,0,posSl,posTp,IntegerToString(posTicket));
+                        trade.Buy(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
                         if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
                     }else if(posType == POSITION_TYPE_SELL){
-                        trade.Sell(posVolume,posSymbol,0,posSl,posTp,IntegerToString(posTicket));
+                        trade.Sell(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
                         if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
                     }
                 }
-                FileClose();
+                FileClose(file);
                 for(int i = PositionsTotal()-1; i >= 0; i--){
                     CPositionInfo pos;
                     if(pos.SelectByIndex(i)){
@@ -121,8 +189,6 @@ void OnTimer(){
                         }
                     }
                 }
-
-
 
             }
         }
@@ -139,7 +205,8 @@ double CalculateFarmLotSize(double propLotSize)
             farmLotSize = propLotSize / (propfirmAccountSize * profitTarget) * realAccountSize;
             break;
         case STAGE_TWO:
-            farmLotSize = (propLotSize + (-realAccountSize)) / (propfirmAccountSize * maxDrawDown) * realAccountSize;
+            // Adjust the scaling to recover losses from Stage One
+            farmLotSize = (propLotSize * 2) / (propfirmAccountSize * maxDrawDown) * realAccountSize;
             break;
         case STAGE_FUNDED:
             farmLotSize = propLotSize / (propfirmAccountSize * maxDrawDown) * realAccountSize;
@@ -148,6 +215,8 @@ double CalculateFarmLotSize(double propLotSize)
             farmLotSize = propLotSize; // default to propLotSize if stage is not recognized
             break;
     }
+    farmLotSize = MathFloor(farmLotSize/LOTSTEP) * LOTSTEP;
+    Print("[CalculateFarmLotSize] Prop Lot Size: ", propLotSize, ", Calculated Farm Lot Size: ", farmLotSize);
     return farmLotSize;
 }
 
