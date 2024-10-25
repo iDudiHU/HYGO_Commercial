@@ -67,11 +67,11 @@ CTrade trade;
 double LOTSTEP;
 //--- input parameters
 // Inputs for Propfirm Information
-input double profitTarget = 0.08;
-input double maxDrawDown = 0.1; // There is a daily too but we don't worry about it right now.
+input double profitTarget = 0.1; // Percent we want more back than cost.
+input double maxDrawDown = 0.05; // There is a daily too but we don't worry about it right now.
 input double propfirmAccountSize = 100000;
 input double realAccountSize = 3000;
-input double PropfirmBuyIn = 500;
+input double BuyInCost = 500;
 input ENUM_MODE Mode = MODE_REAL_MONEY;
 input ENUM_TESTSTAGE Stage = STAGE_FULLY_FUNDED;
 
@@ -202,9 +202,15 @@ void OnTimer(){
                     ENUM_POSITION_TYPE farmType = (posType == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
 
                     if(farmType == POSITION_TYPE_BUY){
-                        trade.Buy(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                        if(!TradeExists(posTicket)) {
+                            trade.Buy(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                            Print("[MODE_REAL_MONEY] Opened BUY trade for symbol: ", posSymbol, " with lot size: ", farmLotSize, ", original ticket: ", posTicket);
+                        }
                     } else if(farmType == POSITION_TYPE_SELL){
-                        trade.Sell(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                        if(!TradeExists(posTicket)) {
+                            trade.Sell(farmLotSize, posSymbol, 0, 0, 0, IntegerToString(posTicket));
+                            Print("[MODE_REAL_MONEY] Opened SELL trade for symbol: ", posSymbol, " with lot size: ", farmLotSize, ", original ticket: ", posTicket);
+                        }
                     }
 
                     if(trade.ResultRetcode() == TRADE_RETCODE_DONE){
@@ -219,6 +225,7 @@ void OnTimer(){
                 if(pos.SelectByIndex(i)){
                     if(arr.SearchFirst(StringToInteger(pos.Comment())) < 0){
                         trade.PositionClose(pos.Ticket());
+                        Print("[MODE_REAL_MONEY] Closed position with ticket: ", pos.Ticket());
                     }
                 }
             }
@@ -251,10 +258,16 @@ void OnTimer(){
                 if(arr.SearchFirst(posTicket) < 0){
                     if(posType == POSITION_TYPE_BUY){
                         trade.Buy(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
-                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
+                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+                        {
+                            arr.InsertSort(posTicket);
+                        }
                     }else if(posType == POSITION_TYPE_SELL){
                         trade.Sell(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
-                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
+                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+                        {
+                            arr.InsertSort(posTicket);
+                        } 
                     }
                 }
                 FileClose(file);
@@ -272,6 +285,19 @@ void OnTimer(){
     }
 }
 
+bool TradeExists(ulong posTicket)
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--){
+        CPositionInfo pos;
+        if(pos.SelectByIndex(i)){
+            if(StringToInteger(pos.Comment()) == posTicket){
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Function to calculate the correct lot size for the farm account based on the prop firm lot size
 double CalculateFarmLotSize(double propLotSize)
 {
@@ -279,7 +305,8 @@ double CalculateFarmLotSize(double propLotSize)
     switch (Stage)
     {
         case STAGE_ONE:
-            farmLotSize = propLotSize / (propfirmAccountSize * profitTarget) * realAccountSize;
+            farmLotSize = BuyInCost * (1.0 + profitTarget) / (propfirmAccountSize * maxDrawDown) * propLotSize; 
+            //farmLotSize = propLotSize / (propfirmAccountSize * profitTarget) * realAccountSize;
             break;
         case STAGE_TWO:
             // Adjust the scaling to recover losses from Stage One
