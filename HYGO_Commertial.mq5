@@ -37,6 +37,20 @@ public:
         Add(newPosition);
     }
 
+    void RemovePosition(ulong ticket)
+    {
+        for (int i = 0; i < Total(); i++)
+        {
+            CStoredPositionInfo *filePos = (this)[i];
+            if (filePos.m_ticket == ticket)
+            {
+                delete filePos;
+                Delete(i);
+                break;
+            }
+        }
+    }
+
     ~CPositionVector()
     {
         for (int i = 0; i < Total(); i++)
@@ -116,73 +130,38 @@ void WritePositionToFile(int file, CPositionInfo &pos)
     FileWriteDouble(file, pos.PriceOpen());
 }
 
-bool PositionExistsInVector(CPositionVector &positionsVector, ulong ticket)
+void RewritePositionFile()
 {
-    for (int i = 0; i < positionsVector.Total(); i++)
+    int file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
+    if (file != INVALID_HANDLE)
     {
-        CStoredPositionInfo *filePos = positionsVector[i];
-        if (filePos.m_ticket == ticket)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-void OnTimer(){
-    if(Mode == MODE_PROPFIRM){
-
-        // Create a vector to store the positions read from the file
-        CPositionVector filePositions;
-        // Read existing file contents to fill the vector with positions
-        int file = FileOpen(FILE_NAME, FILE_READ | FILE_BIN | FILE_COMMON);
-        if (file != INVALID_HANDLE)
-        {
-            while (!FileIsEnding(file))
-            {
-                ulong posTicket = FileReadLong(file);
-                int length = FileReadInteger(file);
-                string posSymbol = FileReadString(file, length);
-                double posVolume = FileReadDouble(file);
-                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)FileReadInteger(file);
-                double posPriceOpen = FileReadDouble(file);
-
-                filePositions.AddPosition(posTicket, posSymbol, posVolume, posType, posPriceOpen);
-            }
-            FileClose(file);
-        }
-
-        // Compare current positions with the ones in the file
-        bool needRewrite = false;
         for (int i = PositionsTotal() - 1; i >= 0; i--)
         {
             CPositionInfo pos;
             if (pos.SelectByIndex(i))
             {
-                if (!PositionExistsInVector(filePositions, pos.Identifier()))
-                {
-                    needRewrite = true;
-                    break;
-                }
+                WritePositionToFile(file, pos);
             }
         }
-
-        if (needRewrite)
+        FileClose(file);
+    }
+    
+    // Log the current state of positions in the file
+    Print("[RewritePositionFile] Current positions in the file:");
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        CPositionInfo pos;
+        if (pos.SelectByIndex(i))
         {
-            // Clear file and write updated positions
-            file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
-            if (file != INVALID_HANDLE)
-            {
-                for (int i = PositionsTotal() - 1; i >= 0; i--)
-                {
-                    CPositionInfo pos;
-                    if (pos.SelectByIndex(i))
-                    {
-                        WritePositionToFile(file, pos);
-                    }
-                }
-                FileClose(file);
-            }
+            Print("Ticket: ", pos.Ticket(), ", Symbol: ", pos.Symbol(), ", Volume: ", pos.Volume(), ", Type: ", EnumToString(pos.PositionType()), ", Price Open: ", pos.PriceOpen());
         }
+    }
+}
+
+void OnTimer(){
+    if(Mode == MODE_PROPFIRM){
+        // Clear the file and write all currently open positions to it
+        RewritePositionFile();
     }else if(Mode == MODE_REAL_MONEY){
         CArrayLong arr;
         arr.Sort();
@@ -258,16 +237,10 @@ void OnTimer(){
                 if(arr.SearchFirst(posTicket) < 0){
                     if(posType == POSITION_TYPE_BUY){
                         trade.Buy(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
-                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
-                        {
-                            arr.InsertSort(posTicket);
-                        }
+                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
                     }else if(posType == POSITION_TYPE_SELL){
                         trade.Sell(posVolume,posSymbol,0,0,0,IntegerToString(posTicket));
-                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
-                        {
-                            arr.InsertSort(posTicket);
-                        } 
+                        if(trade.ResultRetcode() == TRADE_RETCODE_DONE) arr.InsertSort(posTicket);
                     }
                 }
                 FileClose(file);
