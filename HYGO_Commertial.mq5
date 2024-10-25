@@ -5,6 +5,7 @@
 //+------------------------------------------------------------------+
 //--- Includes
 #define FILE_NAME MQLInfoString(MQL_PROGRAM_NAME)+".bin"
+#define FILE_VERSION 1
 #include <trade/trade.mqh>
 #include <arrays/arraylong.mqh>
 #include <Arrays\ArrayObj.mqh>
@@ -41,7 +42,7 @@ public:
     {
         for (int i = 0; i < Total(); i++)
         {
-            CStoredPositionInfo *filePos = (this)[i];
+            CStoredPositionInfo *filePos = this[i];
             if (filePos.m_ticket == ticket)
             {
                 delete filePos;
@@ -81,8 +82,11 @@ CTrade trade;
 double LOTSTEP;
 //--- input parameters
 // Inputs for Propfirm Information
-input double profitTarget = 0.1; // Percent we want more back than cost.
-input double maxDrawDown = 0.05; // There is a daily too but we don't worry about it right now.
+input double profitTargetS1 = 0.1;
+input double profitTargetS2 = 0.05;
+input double profitTargetFU = 0.04;
+input double ComissionCorrectionPC = 0.1;
+input double maxDrawDown = 0.08; // There is a daily too but we don't worry about it right now.
 input double propfirmAccountSize = 100000;
 input double realAccountSize = 3000;
 input double BuyInCost = 500;
@@ -119,6 +123,33 @@ void ClearFile()
     }
 }
 
+void WriteHeaderToFile(int file)
+{
+    FileWriteInteger(file, FILE_VERSION);
+    int length = StringLen(MQLInfoString(MQL_PROGRAM_NAME));
+    FileWriteInteger(file, length);
+    FileWriteString(file, MQLInfoString(MQL_PROGRAM_NAME));
+}
+
+void ReadHeaderAndCheck(int file)
+{
+    if (!FileIsEnding(file))
+    {
+        int fileVersion = FileReadInteger(file);
+        int length = FileReadInteger(file);
+        string programName = FileReadString(file, length);
+        Print("[ReadHeaderAndCheck] File Version: ", fileVersion, ", Program Version: ", FILE_VERSION);
+        Print("[ReadHeaderAndCheck] File Program Name: ", programName, ", Program Name: ", MQLInfoString(MQL_PROGRAM_NAME));
+
+        if (fileVersion != FILE_VERSION || programName != MQLInfoString(MQL_PROGRAM_NAME))
+        {
+            Print("[ReadHeaderAndCheck] Version mismatch detected. File Version: ", fileVersion, ", Program Version: ", FILE_VERSION, ", File Program Name: ", programName, ", Program Name: " , MQLInfoString(MQL_PROGRAM_NAME));
+            FileClose(file);
+            return;
+        }
+    }
+}
+
 void WritePositionToFile(int file, CPositionInfo &pos)
 {
     FileWriteLong(file, pos.Ticket());
@@ -135,6 +166,10 @@ void RewritePositionFile()
     int file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
     if (file != INVALID_HANDLE)
     {
+        // Write header information to file
+        WriteHeaderToFile(file);
+        
+        // Write all open positions to file
         for (int i = PositionsTotal() - 1; i >= 0; i--)
         {
             CPositionInfo pos;
@@ -168,6 +203,8 @@ void OnTimer(){
 
         int file = FileOpen(FILE_NAME,FILE_READ|FILE_BIN|FILE_COMMON);
         if(file != INVALID_HANDLE){
+            ReadHeaderAndCheck(file);
+            
             while(!FileIsEnding(file)){
                 ulong posTicket = FileReadLong(file);
                 int length = FileReadInteger(file);
@@ -274,27 +311,35 @@ bool TradeExists(ulong posTicket)
 // Function to calculate the correct lot size for the farm account based on the prop firm lot size
 double CalculateFarmLotSize(double propLotSize)
 {
-    double farmLotSize = 1.0;
-    switch (Stage)
+    return CalculateFarmLotSize(propLotSize, Stage);
+}
+
+double CalculateFarmLotSize(double propLotSize, ENUM_TESTSTAGE InStage)
+{
+       double farmLotSize = 1.0;
+    switch (InStage)
     {
         case STAGE_ONE:
-            farmLotSize = BuyInCost * (1.0 + profitTarget) / (propfirmAccountSize * maxDrawDown) * propLotSize; 
-            //farmLotSize = propLotSize / (propfirmAccountSize * profitTarget) * realAccountSize;
+            farmLotSize = BuyInCost * (1.0 + ComissionCorrectionPC) / (propfirmAccountSize * maxDrawDown) * propLotSize;
             break;
         case STAGE_TWO:
-            // Adjust the scaling to recover losses from Stage One
-            farmLotSize = (propLotSize * 2) / (propfirmAccountSize * maxDrawDown) * realAccountSize;
+            // BuyinCost + The ammount lost on the real account Adjust the scaling to recover losses from Stage One
+            farmLotSize = (BuyInCost + (propfirmAccountSize * profitTargetS1) * CalculateFarmLotSize(propLotSize, STAGE_ONE))
+            * (1.0 + ComissionCorrectionPC) / (propfirmAccountSize * maxDrawDown) * propLotSize;
             break;
         case STAGE_FUNDED:
-            farmLotSize = propLotSize / (propfirmAccountSize * maxDrawDown) * realAccountSize;
+            farmLotSize = (BuyInCost + (propfirmAccountSize * profitTargetS1) * CalculateFarmLotSize(propLotSize, STAGE_ONE)
+            + (propfirmAccountSize * profitTargetS2) * CalculateFarmLotSize(propLotSize, STAGE_TWO))
+            * (1.0 + ComissionCorrectionPC) / (propfirmAccountSize * maxDrawDown) * propLotSize;
             break;
         default:
             farmLotSize = propLotSize; // default to propLotSize if stage is not recognized
             break;
     }
-    farmLotSize = MathFloor(farmLotSize/LOTSTEP) * LOTSTEP;
+    farmLotSize = MathRound(farmLotSize/LOTSTEP) * LOTSTEP;
     Print("[CalculateFarmLotSize] Prop Lot Size: ", propLotSize, ", Calculated Farm Lot Size: ", farmLotSize);
     return farmLotSize;
+
 }
 
 void OnTick()
