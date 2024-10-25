@@ -8,12 +8,53 @@
 #include <trade/trade.mqh>
 #include <arrays/arraylong.mqh>
 #include <Arrays\ArrayObj.mqh>
+
+//--- Custom class for storing position details
+class CStoredPositionInfo : public CObject {
+public:
+    ulong m_ticket;
+    string m_symbol;
+    double m_volume;
+    ENUM_POSITION_TYPE m_type;
+    double m_price_open;
+
+    CStoredPositionInfo(ulong ticket, string symbol, double volume, ENUM_POSITION_TYPE type, double priceOpen)
+        : m_ticket(ticket), m_symbol(symbol), m_volume(volume), m_type(type), m_price_open(priceOpen) {}
+};
+
+//--- Custom class for managing position info array
+template<typename T>
+class CVector : public CArrayObj {
+public:
+    T *operator[](const int index) const { return (T *)At(index); }
+};
+
+class CPositionVector : public CVector<CStoredPositionInfo> {
+public:
+    void AddPosition(ulong ticket, string symbol, double volume, ENUM_POSITION_TYPE type, double priceOpen)
+    {
+        CStoredPositionInfo *newPosition = new CStoredPositionInfo(ticket, symbol, volume, type, priceOpen);
+        Add(newPosition);
+    }
+
+    ~CPositionVector()
+    {
+        for (int i = 0; i < Total(); i++)
+        {
+            delete At(i);
+        }
+    }
+};
+
+// PROPFIRM: Main mode that can run independently, there may be only one instance of the program running as mode Propfirm
+// MODE_REAL_MONEY: Mode that follows the propfirm farming start, it places the opposite trade, scaled proportionally.
+// SHADOW: Mode that just copies trades 1:1
 //--- Variables
 enum ENUM_MODE
 {
-    MODE_PROPFIRM, // PROPFIRM: Main mode that can run independently, there may be only one instance of the program running as mode Propfirm
-    MODE_FARM,     // FARM: Mode that follows the propfirm farming start, it places the opposite trade, scaled proportionally.
-    MODE_SHADOW    // SHADOW: Mode that just copies trades 1:1
+    MODE_PROPFIRM, //Propfirm account
+    MODE_REAL_MONEY,    //Real account 
+    MODE_SHADOW    // Copy
 };
 enum ENUM_TESTSTAGE
 {
@@ -30,7 +71,8 @@ input double profitTarget = 0.08;
 input double maxDrawDown = 0.1; // There is a daily too but we don't worry about it right now.
 input double propfirmAccountSize = 100000;
 input double realAccountSize = 3000;
-input ENUM_MODE Mode = MODE_FARM;
+input double PropfirmBuyIn = 500;
+input ENUM_MODE Mode = MODE_REAL_MONEY;
 input ENUM_TESTSTAGE Stage = STAGE_FULLY_FUNDED;
 
 //+------------------------------------------------------------------+
@@ -55,6 +97,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void ClearFile()
 {
+    //Opening the file with Write than closing it clears the file.
     int file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
     if (file != INVALID_HANDLE)
     {
@@ -73,12 +116,12 @@ void WritePositionToFile(int file, CPositionInfo &pos)
     FileWriteDouble(file, pos.PriceOpen());
 }
 
-bool PositionExistsInArray(CArrayObj<CPositionInfo> &positionsArray, ulong ticket)
+bool PositionExistsInVector(CPositionVector &positionsVector, ulong ticket)
 {
-    for(int i = 0; i < positionsArray.Total(); i++)
+    for (int i = 0; i < positionsVector.Total(); i++)
     {
-        CPositionInfo *filePos = positionsArray.At(i);
-        if(filePos.Ticket() == ticket)
+        CStoredPositionInfo *filePos = positionsVector[i];
+        if (filePos.m_ticket == ticket)
         {
             return true;
         }
@@ -87,26 +130,60 @@ bool PositionExistsInArray(CArrayObj<CPositionInfo> &positionsArray, ulong ticke
 }
 void OnTimer(){
     if(Mode == MODE_PROPFIRM){
-        int file = FileOpen(FILE_NAME,FILE_WRITE|FILE_BIN|FILE_COMMON);
 
-        if(file != INVALID_HANDLE){
-            if(PositionsTotal() > 0){
-                for(int i = PositionsTotal()-1; i >= 0; i--){
-                    CPositionInfo pos;
-                    if(pos.SelectByIndex(i)){
-                        FileWriteLong(file,pos.Ticket());
-                        int length = StringLen(pos.Symbol());
-                        FileWriteInteger(file,length);
-                        FileWriteString(file,pos.Symbol());
-                        FileWriteDouble(file,pos.Volume());
-                        FileWriteInteger(file,pos.PositionType());
-                        FileWriteDouble(file,pos.PriceOpen());
-                    }
-                }
+        // Create a vector to store the positions read from the file
+        CPositionVector filePositions;
+        // Read existing file contents to fill the vector with positions
+        int file = FileOpen(FILE_NAME, FILE_READ | FILE_BIN | FILE_COMMON);
+        if (file != INVALID_HANDLE)
+        {
+            while (!FileIsEnding(file))
+            {
+                ulong posTicket = FileReadLong(file);
+                int length = FileReadInteger(file);
+                string posSymbol = FileReadString(file, length);
+                double posVolume = FileReadDouble(file);
+                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)FileReadInteger(file);
+                double posPriceOpen = FileReadDouble(file);
+
+                filePositions.AddPosition(posTicket, posSymbol, posVolume, posType, posPriceOpen);
             }
             FileClose(file);
         }
-    }else if(Mode == MODE_FARM){
+
+        // Compare current positions with the ones in the file
+        bool needRewrite = false;
+        for (int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            CPositionInfo pos;
+            if (pos.SelectByIndex(i))
+            {
+                if (!PositionExistsInVector(filePositions, pos.Identifier()))
+                {
+                    needRewrite = true;
+                    break;
+                }
+            }
+        }
+
+        if (needRewrite)
+        {
+            // Clear file and write updated positions
+            file = FileOpen(FILE_NAME, FILE_WRITE | FILE_BIN | FILE_COMMON);
+            if (file != INVALID_HANDLE)
+            {
+                for (int i = PositionsTotal() - 1; i >= 0; i--)
+                {
+                    CPositionInfo pos;
+                    if (pos.SelectByIndex(i))
+                    {
+                        WritePositionToFile(file, pos);
+                    }
+                }
+                FileClose(file);
+            }
+        }
+    }else if(Mode == MODE_REAL_MONEY){
         CArrayLong arr;
         arr.Sort();
 
