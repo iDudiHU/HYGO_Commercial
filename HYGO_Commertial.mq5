@@ -99,7 +99,17 @@ input ENUM_TESTSTAGE Stage = STAGE_FULLY_FUNDED;
 int OnInit()
   {
     LOTSTEP = SymbolInfoDouble(Symbol(),SYMBOL_VOLUME_STEP);
-    EventSetMillisecondTimer(500);
+    EventSetMillisecondTimer(1000);
+    Print("Propfarmer ONLINE");
+    string ModePrint = "Unkown";
+    if(Mode == MODE_PROPFIRM)
+    {
+      ModePrint = "PROPFIRM";
+    } else if(Mode == MODE_REAL_MONEY)
+    {
+      ModePrint = "REAL MONEY";
+    } 
+    Print("Current running mode: ", ModePrint);
     return(INIT_SUCCEEDED);
   }
 //+------------------------------------------------------------------+
@@ -138,8 +148,8 @@ void ReadHeaderAndCheck(int file)
         int fileVersion = FileReadInteger(file);
         int length = FileReadInteger(file);
         string programName = FileReadString(file, length);
-        Print("[ReadHeaderAndCheck] File Version: ", fileVersion, ", Program Version: ", FILE_VERSION);
-        Print("[ReadHeaderAndCheck] File Program Name: ", programName, ", Program Name: ", MQLInfoString(MQL_PROGRAM_NAME));
+        //Print("[ReadHeaderAndCheck] File Version: ", fileVersion, ", Program Version: ", FILE_VERSION);
+        //Print("[ReadHeaderAndCheck] File Program Name: ", programName, ", Program Name: ", MQLInfoString(MQL_PROGRAM_NAME));
 
         if (fileVersion != FILE_VERSION || programName != MQLInfoString(MQL_PROGRAM_NAME))
         {
